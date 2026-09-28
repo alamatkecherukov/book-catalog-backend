@@ -6,10 +6,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "cors": "^2.x.x",
+    "cors": "^2.8.5",
     "dotenv": "^16.x.x",
     "express": "^4.x.x",
     "jsonwebtoken": "^9.x.x",
-    "octokit": "^5.0.5"
+    "octokit": "^3.x.x"
   }
 }
