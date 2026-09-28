@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
+const { Octokit } = require('octokit');
 
 const app = express();
 app.use(cors());
@@ -11,16 +12,62 @@ app.use(express.json());
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const PORT = process.env.PORT || 3000;
-const BOOKS_FILE = 'books.json';
 
-// ========== ФУНКЦИИ РАБОТЫ С ФАЙЛОМ ==========
-function readBooks() {
-    let data = fs.readFileSync(BOOKS_FILE, 'utf-8');
-    return JSON.parse(data);
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_OWNER = process.env.GITHUB_OWNER;
+const GITHUB_REPO = process.env.GITHUB_REPO;
+const GITHUB_FILE = process.env.GITHUB_FILE;
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH;
+
+const octokit = new Octokit({ auth: GITHUB_TOKEN });
+
+// ========== ФУНКЦИИ РАБОТЫ С GITHUB ==========
+async function readBooks() {
+    try {
+        const response = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+            owner: GITHUB_OWNER,
+            repo: GITHUB_REPO,
+            path: GITHUB_FILE,
+            ref: GITHUB_BRANCH
+        });
+
+        const content = Buffer.from(response.data.content, 'base64').toString('utf-8');
+        return JSON.parse(content);
+    } catch (e) {
+        if (e.status === 404) {
+            // Файла нет — создаём пустой
+            await writeBooks([]);
+            return [];
+        }
+        throw e;
+    }
 }
 
-function writeBooks(books) {
-    fs.writeFileSync(BOOKS_FILE, JSON.stringify(books, null, 2));
+async function writeBooks(books) {
+    // Сначала получаем SHA текущего файла (нужен для обновления)
+    let sha = undefined;
+    try {
+        const current = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+            owner: GITHUB_OWNER,
+            repo: GITHUB_REPO,
+            path: GITHUB_FILE,
+            ref: GITHUB_BRANCH
+        });
+        sha = current.data.sha;
+    } catch (e) {
+        if (e.status !== 404) throw e;
+    }
+
+    // Записываем новый контент
+    await octokit.request('PUT /repos/{owner}/{repo}/contents/{path}', {
+        owner: GITHUB_OWNER,
+        repo: GITHUB_REPO,
+        path: GITHUB_FILE,
+        message: 'update books.json',
+        content: Buffer.from(JSON.stringify(books, null, 2)).toString('base64'),
+        branch: GITHUB_BRANCH,
+        sha: sha
+    });
 }
 
 // ========== MIDDLEWARE АВТОРИЗАЦИИ ==========
@@ -39,30 +86,34 @@ function auth(req, res, next) {
 
 // ========== ПУБЛИЧНЫЕ МАРШРУТЫ ==========
 
-// Главная
 app.get('/', (req, res) => {
     res.send('Server work');
 });
 
-// Список всех книг
-app.get('/books', (req, res) => {
-    res.json(readBooks());
-});
-
-// Одна книга по id
-app.get('/books/:id', (req, res) => {
-    let books = readBooks();
-    let id = Number(req.params.id);
-    let book = books.find(b => b.id === id);
-
-    if (!book) {
-        return res.status(404).json({ error: 'Книга не найдена' });
+app.get('/books', async (req, res) => {
+    try {
+        let books = await readBooks();
+        res.json(books);
+    } catch (e) {
+        console.error('readBooks error:', e.message);
+        res.status(500).json({ error: 'Ошибка чтения данных' });
     }
-
-    res.json(book);
 });
 
-// Логин админа
+app.get('/books/:id', async (req, res) => {
+    try {
+        let books = await readBooks();
+        let id = Number(req.params.id);
+        let book = books.find(b => b.id === id);
+        if (!book) {
+            return res.status(404).json({ error: 'Книга не найдена' });
+        }
+        res.json(book);
+    } catch (e) {
+        res.status(500).json({ error: 'Ошибка чтения данных' });
+    }
+});
+
 app.post('/login', (req, res) => {
     if (req.body.password !== ADMIN_PASSWORD) {
         return res.status(401).json({ error: 'Неверный пароль' });
@@ -71,75 +122,79 @@ app.post('/login', (req, res) => {
     res.json({ token });
 });
 
-// Заказ — публичный, отправляет в Telegram
 app.post('/order', async (req, res) => {
     let { bookId, contact } = req.body;
-
     if (!bookId || !contact) {
         return res.status(400).json({ error: 'Не хватает данных' });
     }
 
-    let books = readBooks();
-    let book = books.find(b => b.id === Number(bookId));
-
-    if (!book) {
-        return res.status(404).json({ error: 'Книга не найдена' });
-    }
-
     try {
+        let books = await readBooks();
+        let book = books.find(b => b.id === Number(bookId));
+        if (!book) {
+            return res.status(404).json({ error: 'Книга не найдена' });
+        }
         await sendOrderToTelegram(book, contact);
         res.json({ success: true });
     } catch (e) {
-        console.error('Telegram error:', e.message);
+        console.error('Order error:', e.message);
         res.status(500).json({ error: 'Не удалось отправить заказ' });
     }
 });
 
 // ========== ЗАЩИЩЁННЫЕ МАРШРУТЫ ==========
 
-// Добавить книгу
-app.post('/books', auth, (req, res) => {
-    let books = readBooks();
-    let { name, img, shortOpis, price, fullOpis, material } = req.body;
+app.post('/books', auth, async (req, res) => {
+    try {
+        let books = await readBooks();
+        let { name, img, shortOpis, price, fullOpis, material } = req.body;
 
-    if (!name || !price) {
-        return res.status(400).json({ error: 'Название и цена обязательны' });
+        if (!name || !price) {
+            return res.status(400).json({ error: 'Название и цена обязательны' });
+        }
+
+        let newId = books.length > 0
+            ? Math.max(...books.map(b => b.id)) + 1
+            : 1;
+
+        let add = {
+            id: newId,
+            name,
+            img: img || '',
+            shortOpis: shortOpis || '',
+            price: Number(price),
+            fullOpis: fullOpis || '',
+            material: material || ''
+        };
+
+        books.push(add);
+        await writeBooks(books);
+
+        res.json({ success: true, book: add });
+    } catch (e) {
+        console.error('Add book error:', e.message);
+        res.status(500).json({ error: 'Ошибка сохранения' });
     }
-
-    let newId = books.length > 0
-        ? Math.max(...books.map(b => b.id)) + 1
-        : 1;
-
-    let add = {
-        id: newId,
-        name,
-        img: img || '',
-        shortOpis: shortOpis || '',
-        price: Number(price),
-        fullOpis: fullOpis || '',
-        material: material || ''
-    };
-
-    books.push(add);
-    writeBooks(books);
-
-    res.json({ success: true, book: add });
 });
 
-// Удалить книгу
-app.delete('/books/:id', auth, (req, res) => {
-    let books = readBooks();
-    let id = Number(req.params.id);
-    let before = books.length;
+app.delete('/books/:id', auth, async (req, res) => {
+    try {
+        let books = await readBooks();
+        let id = Number(req.params.id);
+        let before = books.length;
 
-    books = books.filter(b => b.id !== id);
+        books = books.filter(b => b.id !== id);
 
-    if (books.length === before) {
-        return res.status(404).json({ error: 'Книга не найдена' });
+        if (books.length === before) {
+            return res.status(404).json({ error: 'Книга не найдена' });
+        }
+
+        await writeBooks(books);
+        res.json({ success: true });
+    } catch (e) {
+        console.error('Delete error:', e.message);
+        res.status(500).json({ error: 'Ошибка удаления' });
     }
-
-    writeBooks(books);
-    res.json({ success: true });
 });
 
 // ========== TELEGRAM ==========
