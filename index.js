@@ -3,11 +3,14 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
 const { Octokit } = require('octokit');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
@@ -19,9 +22,10 @@ const GITHUB_REPO = process.env.GITHUB_REPO;
 const GITHUB_FILE = process.env.GITHUB_FILE;
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH;
 
+const IMGBB_KEY = process.env.IMGBB_KEY;
+
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-// ========== ФУНКЦИИ РАБОТЫ С GITHUB ==========
 async function readBooks() {
     try {
         const response = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
@@ -35,7 +39,6 @@ async function readBooks() {
         return JSON.parse(content);
     } catch (e) {
         if (e.status === 404) {
-            // Файла нет — создаём пустой
             await writeBooks([]);
             return [];
         }
@@ -44,7 +47,6 @@ async function readBooks() {
 }
 
 async function writeBooks(books) {
-    // Сначала получаем SHA текущего файла (нужен для обновления)
     let sha = undefined;
     try {
         const current = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
@@ -58,7 +60,6 @@ async function writeBooks(books) {
         if (e.status !== 404) throw e;
     }
 
-    // Записываем новый контент
     await octokit.request('PUT /repos/{owner}/{repo}/contents/{path}', {
         owner: GITHUB_OWNER,
         repo: GITHUB_REPO,
@@ -70,7 +71,6 @@ async function writeBooks(books) {
     });
 }
 
-// ========== MIDDLEWARE АВТОРИЗАЦИИ ==========
 function auth(req, res, next) {
     let token = req.headers.authorization;
     if (!token) {
@@ -83,8 +83,6 @@ function auth(req, res, next) {
         return res.status(401).json({ error: 'Невалидный токен' });
     }
 }
-
-// ========== ПУБЛИЧНЫЕ МАРШРУТЫ ==========
 
 app.get('/', (req, res) => {
     res.send('Server work');
@@ -142,8 +140,6 @@ app.post('/order', async (req, res) => {
     }
 });
 
-// ========== ЗАЩИЩЁННЫЕ МАРШРУТЫ ==========
-
 app.post('/books', auth, async (req, res) => {
     try {
         let books = await readBooks();
@@ -197,7 +193,32 @@ app.delete('/books/:id', auth, async (req, res) => {
     }
 });
 
-// ========== TELEGRAM ==========
+app.post('/upload', upload.single('image'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Файл не получен' });
+        }
+
+        const formData = new FormData();
+        formData.append('image', new Blob([req.file.buffer]), req.file.originalname);
+
+        const response = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            res.json({ url: data.data.url });
+        } else {
+            res.status(400).json({ error: data.error.message });
+        }
+    } catch (e) {
+        console.error('Upload error:', e.message);
+        res.status(500).json({ error: 'Ошибка загрузки' });
+    }
+});
+
 async function sendOrderToTelegram(book, contact) {
     const TG_TOKEN = process.env.TG_TOKEN;
     const TG_CHAT_ID = process.env.TG_CHAT_ID;
@@ -230,7 +251,6 @@ async function sendOrderToTelegram(book, contact) {
     }
 }
 
-// ========== ЗАПУСК ==========
 app.listen(PORT, () => {
     console.log(`Сервер запущен: http://localhost:${PORT}`);
 });
