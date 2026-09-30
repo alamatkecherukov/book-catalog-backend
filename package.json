@@ -10,6 +10,7 @@
     "dotenv": "^16.x.x",
     "express": "^4.x.x",
     "jsonwebtoken": "^9.x.x",
+    "multer": "^2.4.0",
     "octokit": "^3.x.x"
   }
 }
